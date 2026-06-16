@@ -26,20 +26,15 @@ class StartCompliance(SubstepAction):
     def forward(self, state, observation):
         quarantine_start_prob = observation["quarantine_start_prob"]
         is_quarantined = observation["is_quarantined"]
-        disease_stage = observation["disease_stage"]
-
-        exposed_infected_agents = torch.logical_or(
-            disease_stage == self.EXPOSED_VAR, disease_stage == self.INFECTED_VAR
-        )
+        positive_test_result = observation["positive_test_result"]
 
         quarantine_start_decision = discrete_sample(
             quarantine_start_prob, size=self.num_agents, device=self.device
-        ).unsqueeze(1)
-        quarantine_start_decision = torch.logical_and(
-            quarantine_start_decision, logical_not(is_quarantined)
-        )
-        quarantine_start_decision = torch.logical_and(
-            quarantine_start_decision, exposed_infected_agents
+        ).unsqueeze(1).bool()
+        quarantine_start_decision = (
+            quarantine_start_decision
+            & torch.logical_not(is_quarantined.bool())
+            & positive_test_result.bool()
         )
 
         return {self.output_variables[0]: quarantine_start_decision}
@@ -60,9 +55,7 @@ class BreakCompliance(SubstepAction):
 
         quarantine_break_decision = discrete_sample(
             quarantine_break_prob, size=self.num_agents, device=self.device
-        ).unsqueeze(1)
-        quarantine_break_decision = torch.logical_and(
-            is_quarantined, quarantine_break_decision
-        )
+        ).unsqueeze(1).bool()
+        quarantine_break_decision = is_quarantined.bool() & quarantine_break_decision
 
         return {self.output_variables[0]: quarantine_break_decision}

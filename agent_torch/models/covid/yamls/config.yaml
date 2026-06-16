@@ -38,12 +38,12 @@ simulation_metadata:
     lr: 5e-3
     lr_gamma: 0.9999
     model_path: saved_model.pth
-  mapping_path: ${simulation_metadata.population_dir}/population_mapping.json
+  mapping_path: ${simulation_metadata.population_dir}/mapping.json
   num_agents: 37518
   num_episodes: 5
   num_steps_per_episode: 21
-  num_substeps_per_step: 2
-  population_dir: C:\Users\ayanp\OneDrive\Documents\GitHub\AgentTorch-1\agent_torch\populations\astoria
+  num_substeps_per_step: 4
+  population_dir: agent_torch/populations/astoria
   quarantine_days: 12
   test_ineligible_days: 2
   test_result_delay_days: 3
@@ -151,6 +151,42 @@ state:
           - ${state.agents.citizens.number}
           - 1
           value: false
+        isolation_streak_days:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: Consecutive days the agent chose isolation
+          shape:
+          - ${state.agents.citizens.number}
+          - 1
+          value: 0.0
+        last_isolation_decision:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: Previous isolation decision
+          shape:
+          - ${state.agents.citizens.number}
+          - 1
+          value: 0.0
+        last_test_action:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: Whether the agent took a test on the previous day
+          shape:
+          - ${state.agents.citizens.number}
+          - 1
+          value: 0.0
+        last_test_positive:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: Whether the agent most recently received a positive test
+          shape:
+          - ${state.agents.citizens.number}
+          - 1
+          value: 0.0
         next_stage_time:
           dtype: int
           initialization_function:
@@ -175,6 +211,60 @@ state:
           - ${state.agents.citizens.number}
           - 1
           value: 0
+        num_isolation_days:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: Total days the agent chose isolation
+          shape:
+          - ${state.agents.citizens.number}
+          - 1
+          value: 0.0
+        num_positive_tests:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: Total positive COVID tests for the agent
+          shape:
+          - ${state.agents.citizens.number}
+          - 1
+          value: 0.0
+        num_quarantine_days:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: Total days the agent spent in quarantine
+          shape:
+          - ${state.agents.citizens.number}
+          - 1
+          value: 0.0
+        num_tests_taken:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: Total COVID tests taken by the agent
+          shape:
+          - ${state.agents.citizens.number}
+          - 1
+          value: 0.0
+        positive_test_result:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: Positive test result received today
+          shape:
+          - ${state.agents.citizens.number}
+          - 1
+          value: 0.0
+        quarantine_streak_days:
+          dtype: float
+          initialization_function: null
+          learnable: false
+          name: Consecutive days the agent has been quarantined
+          shape:
+          - ${state.agents.citizens.number}
+          - 1
+          value: 0.0
         quarantine_start_date:
           dtype: int
           initialization_function: null
@@ -192,7 +282,7 @@ state:
           shape:
           - ${state.agents.citizens.number}
           - 1
-          value: ${simulation_metadata.INFINITY_TIME}
+          value: 0
         test_result_date:
           dtype: int
           initialization_function: null
@@ -409,6 +499,19 @@ substeps:
           generator: MakeIsolationDecision
           input_variables:
             age: agents/citizens/age
+            awaiting_test_result: agents/citizens/awaiting_test_result
+            disease_stage: agents/citizens/disease_stage
+            is_quarantined: agents/citizens/is_quarantined
+            isolation_streak_days: agents/citizens/isolation_streak_days
+            last_isolation_decision: agents/citizens/last_isolation_decision
+            last_test_action: agents/citizens/last_test_action
+            last_test_positive: agents/citizens/last_test_positive
+            num_isolation_days: agents/citizens/num_isolation_days
+            num_positive_tests: agents/citizens/num_positive_tests
+            num_quarantine_days: agents/citizens/num_quarantine_days
+            num_tests_taken: agents/citizens/num_tests_taken
+            positive_test_result: agents/citizens/positive_test_result
+            quarantine_streak_days: agents/citizens/quarantine_streak_days
           output_variables:
           - isolation_decision
     reward: null
@@ -434,6 +537,7 @@ substeps:
           disease_stage: agents/citizens/disease_stage
           exposed_to_infected_time: environment/exposed_to_infected_time
           infected_time: agents/citizens/infected_time
+          is_quarantined: agents/citizens/is_quarantined
           lam_gamma_integrals: environment/lam_gamma_integrals
           mean_interactions: environment/mean_interactions
           next_stage_time: agents/citizens/next_stage_time
@@ -442,6 +546,17 @@ substeps:
         - next_stage_time
         - infected_time
         - daily_infected
+      update_isolation_memory:
+        arguments: null
+        generator: UpdateIsolationMemory
+        input_variables:
+          isolation_streak_days: agents/citizens/isolation_streak_days
+          last_isolation_decision: agents/citizens/last_isolation_decision
+          num_isolation_days: agents/citizens/num_isolation_days
+        output_variables:
+        - last_isolation_decision
+        - isolation_streak_days
+        - num_isolation_days
   '1':
     active_agents:
     - citizens
@@ -474,3 +589,121 @@ substeps:
         - disease_stage
         - next_stage_time
         - daily_deaths
+  '2':
+    active_agents:
+    - citizens
+    description: COVID testing and delayed test result updates
+    name: Testing
+    observation:
+      citizens:
+        get_testing_state:
+          arguments: null
+          generator: GetTestingState
+          input_variables:
+            awaiting_test_result: agents/citizens/awaiting_test_result
+            disease_stage: agents/citizens/disease_stage
+            is_quarantined: agents/citizens/is_quarantined
+            test_compliance_prob: environment/test_compliance_prob
+            test_re_eligble_date: agents/citizens/test_re_eligble_date
+          output_variables:
+          - awaiting_test_result
+          - disease_stage
+          - is_quarantined
+          - test_compliance_prob
+          - test_re_eligble_date
+    policy:
+      citizens:
+        accept_test:
+          arguments: null
+          generator: AcceptTest
+          input_variables:
+            disease_stage: agents/citizens/disease_stage
+            is_quarantined: agents/citizens/is_quarantined
+            test_compliance_prob: environment/test_compliance_prob
+          output_variables:
+          - test_acceptance_action
+    reward: null
+    transition:
+      update_test_status:
+        arguments: null
+        generator: UpdateTestStatus
+        input_variables:
+          awaiting_test_result: agents/citizens/awaiting_test_result
+          disease_stage: agents/citizens/disease_stage
+          last_test_action: agents/citizens/last_test_action
+          last_test_positive: agents/citizens/last_test_positive
+          num_positive_tests: agents/citizens/num_positive_tests
+          num_tests_taken: agents/citizens/num_tests_taken
+          positive_test_result: agents/citizens/positive_test_result
+          test_false_positive_prob: environment/test_false_positive_prob
+          test_re_eligble_date: agents/citizens/test_re_eligble_date
+          test_result_date: agents/citizens/test_result_date
+          test_true_positive_prob: environment/test_true_positive_prob
+        output_variables:
+        - awaiting_test_result
+        - test_result_date
+        - test_re_eligble_date
+        - positive_test_result
+        - last_test_action
+        - last_test_positive
+        - num_tests_taken
+        - num_positive_tests
+  '3':
+    active_agents:
+    - citizens
+    description: Quarantine observation after positive test results
+    name: Quarantine
+    observation:
+      citizens:
+        get_quarantine_state:
+          arguments: null
+          generator: GetQuarantineState
+          input_variables:
+            disease_stage: agents/citizens/disease_stage
+            is_quarantined: agents/citizens/is_quarantined
+            positive_test_result: agents/citizens/positive_test_result
+            quarantine_break_prob: environment/quarantine_break_prob
+            quarantine_start_prob: environment/quarantine_start_prob
+          output_variables:
+          - disease_stage
+          - is_quarantined
+          - positive_test_result
+          - quarantine_break_prob
+          - quarantine_start_prob
+    policy:
+      citizens:
+        start_compliance:
+          arguments: null
+          generator: StartCompliance
+          input_variables:
+            disease_stage: agents/citizens/disease_stage
+            is_quarantined: agents/citizens/is_quarantined
+            positive_test_result: agents/citizens/positive_test_result
+            quarantine_start_prob: environment/quarantine_start_prob
+          output_variables:
+          - start_compliance_action
+        break_compliance:
+          arguments: null
+          generator: BreakCompliance
+          input_variables:
+            is_quarantined: agents/citizens/is_quarantined
+            quarantine_break_prob: environment/quarantine_break_prob
+          output_variables:
+          - break_compliance_action
+    reward: null
+    transition:
+      update_quarantine_status:
+        arguments: null
+        generator: UpdateQuarantineStatus
+        input_variables:
+          is_quarantined: agents/citizens/is_quarantined
+          num_quarantine_days: agents/citizens/num_quarantine_days
+          positive_test_result: agents/citizens/positive_test_result
+          quarantine_start_date: agents/citizens/quarantine_start_date
+          quarantine_streak_days: agents/citizens/quarantine_streak_days
+        output_variables:
+        - is_quarantined
+        - quarantine_start_date
+        - positive_test_result
+        - quarantine_streak_days
+        - num_quarantine_days

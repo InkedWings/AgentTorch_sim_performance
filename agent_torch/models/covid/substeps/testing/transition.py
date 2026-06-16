@@ -6,13 +6,7 @@ import torch
 import re
 
 from agent_torch.core.substep import SubstepTransition
-from agent_torch.core.helpers import (
-    get_by_path,
-    logical_and,
-    logical_not,
-    logical_or,
-    discrete_sample,
-)
+from agent_torch.core.helpers import get_by_path, discrete_sample
 
 
 class UpdateTestStatus(SubstepTransition):
@@ -49,41 +43,38 @@ class UpdateTestStatus(SubstepTransition):
         false_positive_prob,
     ):
         """Agents receive test result"""
-        agents_result_expected_today = (agent_result_date == t).long()
+        agents_result_expected_today = agent_result_date == t
 
         # 1: reset agents_awaiting_test_result
-        agents_awaiting_results = (
-            agents_awaiting_results + agents_result_expected_today * self.GOT_RESULT_VAR
+        agents_awaiting_results = agents_awaiting_results.bool() & torch.logical_not(
+            agents_result_expected_today
         )
 
         # 2: get true_positive and false_positive results - check candidates + sample based on TPR and FPR
-        exposed_infected_agents = logical_and(
-            (current_stages > self.SUSCEPTIBLE_VAR).long(),
-            (current_stages < self.RECOVERED_VAR).long(),
+        exposed_infected_agents = (
+            (current_stages > self.SUSCEPTIBLE_VAR)
+            & (current_stages < self.RECOVERED_VAR)
         )
 
-        true_positive_result_candidates = logical_and(
-            exposed_infected_agents, agents_result_expected_today
+        true_positive_result_candidates = (
+            exposed_infected_agents.bool() & agents_result_expected_today
         )
-        false_positive_result_candidates = logical_and(
-            logical_not(exposed_infected_agents), agents_result_expected_today
+        false_positive_result_candidates = (
+            torch.logical_not(exposed_infected_agents.bool())
+            & agents_result_expected_today
         )
 
         true_positive_mask = discrete_sample(
             sample_prob=true_positive_prob, size=(self.num_agents,), device=self.device
-        ).unsqueeze(1)
-        true_positive_results = logical_and(
-            true_positive_result_candidates, true_positive_mask
-        )
+        ).unsqueeze(1).bool()
+        true_positive_results = true_positive_result_candidates & true_positive_mask
 
         false_positive_mask = discrete_sample(
             sample_prob=false_positive_prob, size=(self.num_agents,), device=self.device
-        ).unsqueeze(1)
-        false_positive_results = logical_and(
-            false_positive_result_candidates, false_positive_mask
-        )
+        ).unsqueeze(1).bool()
+        false_positive_results = false_positive_result_candidates & false_positive_mask
 
-        positive_results = logical_or(true_positive_results, false_positive_results)
+        positive_results = true_positive_results | false_positive_results
 
         # 3: agents are in-eligible to test again for the next few days
         test_re_eligble_date[agents_result_expected_today.bool()] = (
@@ -103,7 +94,7 @@ class UpdateTestStatus(SubstepTransition):
     ):
         """Eligible Agent get themselves tested and receive test result date"""
         agents_awaiting_results = (
-            agents_awaiting_results + test_enrolled_agents * self.AWAITING_RESULT_VAR
+            agents_awaiting_results.bool() | test_enrolled_agents.bool()
         )
         agents_result_date[test_enrolled_agents.bool()] = (
             t + self.test_result_delay_days
@@ -114,8 +105,6 @@ class UpdateTestStatus(SubstepTransition):
     def forward(self, state, action=None):
         t = state["current_step"]
         input_variables = self.input_variables
-
-        print("Executing Substep Transition: UpdateTestStatus")
 
         current_stages = get_by_path(
             state, re.split("/", input_variables["disease_stage"])
@@ -135,6 +124,18 @@ class UpdateTestStatus(SubstepTransition):
         )
         false_positive_prob = get_by_path(
             state, re.split("/", self.input_variables["test_false_positive_prob"])
+        )
+        last_test_action = get_by_path(
+            state, re.split("/", self.input_variables["last_test_action"])
+        )
+        num_tests_taken = get_by_path(
+            state, re.split("/", self.input_variables["num_tests_taken"])
+        )
+        last_test_positive = get_by_path(
+            state, re.split("/", self.input_variables["last_test_positive"])
+        )
+        num_positive_tests = get_by_path(
+            state, re.split("/", self.input_variables["num_positive_tests"])
         )
 
         # step 1: agents receive test result and may test positive
@@ -156,20 +157,28 @@ class UpdateTestStatus(SubstepTransition):
         # step 2: agents take test and join result queue
         test_willing_agents = action["citizens"]["test_acceptance_action"]
 
-        test_ineligible_cooldown = (t < test_re_eligble_date).long()
-        test_ineligible = logical_or(
-            test_ineligible_cooldown, agents_awaiting_results
-        ).long()
-        test_enrolled_agents = logical_and(
-            test_willing_agents, logical_not(test_ineligible)
+        test_ineligible_cooldown = t < test_re_eligble_date
+        test_ineligible = test_ineligible_cooldown | agents_awaiting_results.bool()
+        test_enrolled_agents = test_willing_agents.bool() & torch.logical_not(
+            test_ineligible
         )
 
         agents_awaiting_results, agents_result_date = self.get_tested(
             t, agents_awaiting_results, agents_result_date, test_enrolled_agents
         )
 
+        last_test_action = test_enrolled_agents.float()
+        last_test_positive = positive_results.float()
+        num_tests_taken = num_tests_taken + test_enrolled_agents.float()
+        num_positive_tests = num_positive_tests + positive_results.float()
+
         return {
             self.output_variables[0]: agents_awaiting_results,
             self.output_variables[1]: agents_result_date,
             self.output_variables[2]: test_re_eligble_date,
+            self.output_variables[3]: positive_results.float(),
+            self.output_variables[4]: last_test_action,
+            self.output_variables[5]: last_test_positive,
+            self.output_variables[6]: num_tests_taken,
+            self.output_variables[7]: num_positive_tests,
         }

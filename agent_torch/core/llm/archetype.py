@@ -20,7 +20,7 @@ class Archetype:
         .parameters()               # learnable Variable params (Template only)
     """
 
-    def __init__(self, prompt, llm, n_arch: int = 1):
+    def __init__(self, prompt="", llm=None, n_arch: int = 1):
         self.n_arch = n_arch
         self._prompt = prompt
         self._llm = llm
@@ -38,13 +38,16 @@ class Archetype:
 
         # Initialize LLM archetypes (n_arch copies)
         # Initialize if llm exposes initialize_llm; otherwise assume ready
-        init = getattr(self._llm, "initialize_llm", None)
-        if callable(init):
-            init()
-        self._llm_archetypes: List[LLMArchetype] = [
-            LLMArchetype(self._llm, base_user_prompt, n_arch=self.n_arch)
-            for _ in range(self.n_arch)
-        ]
+        if self._llm is None:
+            self._llm_archetypes: List[LLMArchetype] = []
+        else:
+            init = getattr(self._llm, "initialize_llm", None)
+            if callable(init):
+                init()
+            self._llm_archetypes = [
+                LLMArchetype(self._llm, base_user_prompt, n_arch=self.n_arch)
+                for _ in range(self.n_arch)
+            ]
 
     # --- Public API ---
     def broadcast(self, population, *, match_on: str | None = None, group_on: str | list | None = None) -> None:
@@ -251,7 +254,7 @@ class LLMArchetype:
         self.memory_handler = _NoOpMemoryHandler()
 
     def __call__(self, prompt_list, last_k):
-        last_k = 2 * last_k + 8
+        last_k = 0 if int(last_k) <= 0 else 2 * int(last_k) + 8
 
         prompt_inputs = self.preprocess_prompts(prompt_list, last_k)
         # Support llm objects that are directly callable or expose .prompt
@@ -260,9 +263,13 @@ class LLMArchetype:
         else:
             agent_outputs = self.llm.prompt(prompt_inputs)
 
-        # Save conversation history
-        for id, (prompt_input, agent_output) in enumerate(zip(prompt_inputs, agent_outputs)):
-            self.save_memory(prompt_input, agent_output, agent_id=id)
+        # Save conversation history only when history is enabled.
+        if last_k > 0:
+            for default_id, (prompt_input, agent_output) in enumerate(
+                zip(prompt_inputs, agent_outputs)
+            ):
+                agent_id = self._get_prompt_memory_id(prompt_input, default_id)
+                self.save_memory(prompt_input, agent_output, agent_id=agent_id)
 
         return agent_outputs
 
@@ -300,11 +307,24 @@ class LLMArchetype:
             elif self.backend in ["langchain", "claude"]:
                 self.memory_handler = LangchainMemoryHandler(agent_memory=agent_memory)
 
+    def _get_prompt_memory_id(self, prompt, default_id):
+        if isinstance(prompt, dict):
+            return int(prompt.get("_memory_id", prompt.get("memory_id", default_id)))
+        return int(default_id)
+
     def preprocess_prompts(self, prompt_list, last_k):
         prompt_inputs = []
-        for agent_id, prompt in enumerate(prompt_list):
+        for default_id, prompt in enumerate(prompt_list):
+            agent_id = self._get_prompt_memory_id(prompt, default_id)
             history = self.get_memory(last_k, agent_id=agent_id)["chat_history"]
-            prompt_inputs.append({"agent_query": prompt, "chat_history": history})
+            if isinstance(prompt, dict):
+                prompt_input = dict(prompt)
+                prompt_input.pop("memory_id", None)
+                prompt_input["_memory_id"] = agent_id
+                prompt_input["chat_history"] = history
+            else:
+                prompt_input = {"agent_query": prompt, "chat_history": history}
+            prompt_inputs.append(prompt_input)
         return prompt_inputs
 
     def reflect(self, reflection_prompt, agent_id, last_k=3):

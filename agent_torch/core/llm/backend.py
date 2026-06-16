@@ -128,3 +128,108 @@ class DspyLLM(LLMBackend):
             with open(save_path, "w") as f:
                 f.write(printed_data)
         sys.stdout = original_stdout
+
+
+class LangchainLLM(LLMBackend):
+    """
+    LangChain/OpenAI chat backend.
+
+    This keeps the older public API used by the docs and COVID model imports:
+    `LangchainLLM(openai_api_key=..., agent_profile=..., model=...)`.
+    """
+
+    def __init__(
+        self,
+        openai_api_key,
+        agent_profile,
+        model="gpt-4o-mini",
+        temperature=0.0,
+        base_url=None,
+        max_tokens=None,
+        timeout=None,
+        max_concurrency=8,
+    ):
+        super().__init__()
+        self.backend = "langchain"
+        self.openai_api_key = openai_api_key
+        self.agent_profile = agent_profile
+        self.model = model
+        self.temperature = temperature
+        self.base_url = base_url
+        self.max_tokens = max_tokens
+        self.timeout = timeout
+        self.max_concurrency = max(1, int(max_concurrency))
+        self.llm = None
+
+    def initialize_llm(self):
+        from langchain_openai import ChatOpenAI
+
+        kwargs = {
+            "model": self.model,
+            "api_key": self.openai_api_key,
+            "temperature": self.temperature,
+        }
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
+        if self.max_tokens is not None:
+            kwargs["max_tokens"] = self.max_tokens
+        if self.timeout is not None:
+            kwargs["timeout"] = self.timeout
+
+        self.llm = ChatOpenAI(**kwargs)
+        return self.llm
+
+    def prompt(self, prompt_list):
+        if self.llm is None:
+            self.initialize_llm()
+
+        if len(prompt_list) <= 1 or self.max_concurrency == 1:
+            return [self._prompt_one(prompt_input) for prompt_input in prompt_list]
+
+        workers = min(self.max_concurrency, len(prompt_list))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            return list(executor.map(self._prompt_one, prompt_list))
+
+    def _prompt_one(self, prompt_input):
+        if isinstance(prompt_input, dict):
+            query = prompt_input.get("agent_query", "")
+            history = prompt_input.get("chat_history", [])
+            system_prompt = prompt_input.get("system_prompt", self.agent_profile)
+        else:
+            query = prompt_input
+            history = []
+            system_prompt = self.agent_profile
+
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(self._normalize_history(history))
+        messages.append({"role": "user", "content": query})
+
+        response = self.llm.invoke(messages)
+        return {"text": getattr(response, "content", str(response))}
+
+    def _normalize_history(self, history):
+        messages = []
+        for item in history or []:
+            if hasattr(item, "content"):
+                messages.append(item)
+                continue
+
+            if isinstance(item, dict) and "role" in item and "content" in item:
+                messages.append(item)
+                continue
+
+            if isinstance(item, dict) and "query" in item and "output" in item:
+                query = item["query"]
+                output = item["output"]
+                if isinstance(query, dict):
+                    query = query.get("agent_query", str(query))
+                if isinstance(output, dict):
+                    output = output.get("text", str(output))
+                messages.append({"role": "user", "content": str(query)})
+                messages.append({"role": "assistant", "content": str(output)})
+        return messages
+
+    def inspect_history(self, last_k, file_dir):
+        raise NotImplementedError(
+            "inspect_history is not implemented for LangchainLLM."
+        )

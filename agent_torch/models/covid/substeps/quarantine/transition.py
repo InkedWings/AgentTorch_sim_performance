@@ -1,8 +1,8 @@
-import torch.nn as nn
 import re
+import torch
 
 from agent_torch.core.substep import SubstepTransition
-from agent_torch.core.helpers import get_by_path, logical_not
+from agent_torch.core.helpers import get_by_path
 
 
 class UpdateQuarantineStatus(SubstepTransition):
@@ -27,52 +27,6 @@ class UpdateQuarantineStatus(SubstepTransition):
         self.START_QUARANTINE_VAR = 1
         self.BREAK_QUARANTINE_VAR = -1
 
-    def _end_quarantine(self, t, is_quarantined, quarantine_start_date):
-        agents_quarantine_end_date = quarantine_start_date + self.quarantine_days
-        agent_quarantine_ends = (t >= agents_quarantine_end_date).long()
-
-        is_quarantined = (
-            is_quarantined + agent_quarantine_ends * self.END_QUARANTINE_VAR
-        )
-        quarantine_start_date = (
-            quarantine_start_date * (1 - agent_quarantine_ends)
-            + (self.INFINITY_TIME) * agent_quarantine_ends
-        )
-
-        return is_quarantined, quarantine_start_date
-
-    def _start_quarantine(
-        self, t, is_quarantined, quarantine_start_date, agent_quarantine_start_action
-    ):
-        agents_quarantine_start = agent_quarantine_start_action.long()
-
-        is_quarantined = (
-            is_quarantined + agents_quarantine_start * self.START_QUARANTINE_VAR
-        )
-        quarantine_start_date = (
-            quarantine_start_date * logical_not(agents_quarantine_start)
-            + agents_quarantine_start * t
-        )
-        #         quarantine_start_date = quarantine_start_date*(1 - agents_quarantine_start) + (agents_quarantine_start)*t
-
-        return is_quarantined, quarantine_start_date
-
-    def _break_quarantine(
-        self, t, is_quarantined, quarantine_start_date, agent_quarantine_break_action
-    ):
-        agents_quarantine_break = agent_quarantine_break_action.long()
-
-        is_quarantined = (
-            is_quarantined + agents_quarantine_break * self.BREAK_QUARANTINE_VAR
-        )
-        quarantine_start_date = (
-            quarantine_start_date * logical_not(agents_quarantine_break)
-            + agents_quarantine_break * self.INFINITY_TIME
-        )
-        #         quarantine_start_date = quarantine_start_date*(1 - agents_quarantine_break) + (self.INFINITY_TIME)*agents_quarantine_break
-
-        return is_quarantined, quarantine_start_date
-
     def update_quarantine_status(
         self,
         t,
@@ -81,28 +35,53 @@ class UpdateQuarantineStatus(SubstepTransition):
         agent_quarantine_start_action,
         agent_quarantine_break_action,
     ):
-        is_quarantined, quarantine_start_date = self._end_quarantine(
-            t, is_quarantined, quarantine_start_date
+        currently_quarantined = is_quarantined.bool()
+        start_action = agent_quarantine_start_action.bool()
+        break_action = agent_quarantine_break_action.bool()
+
+        quarantine_ends = currently_quarantined & (
+            t >= quarantine_start_date + self.quarantine_days
         )
-        is_quarantined, quarantine_start_date = self._start_quarantine(
-            t, is_quarantined, quarantine_start_date, agent_quarantine_start_action
+        after_end = currently_quarantined & torch.logical_not(quarantine_ends)
+
+        starts_today = start_action & torch.logical_not(after_end)
+        after_start = after_end | starts_today
+
+        breaks_today = break_action & after_start
+        new_is_quarantined = after_start & torch.logical_not(breaks_today)
+
+        reset_start_date = quarantine_ends | breaks_today
+        new_quarantine_start_date = torch.where(
+            reset_start_date,
+            torch.full_like(quarantine_start_date, self.INFINITY_TIME),
+            quarantine_start_date,
         )
-        is_quarantined, quarantine_start_date = self._break_quarantine(
-            t, is_quarantined, quarantine_start_date, agent_quarantine_break_action
+        new_quarantine_start_date = torch.where(
+            starts_today,
+            torch.full_like(quarantine_start_date, int(t)),
+            new_quarantine_start_date,
         )
 
-        return is_quarantined, quarantine_start_date
+        return new_is_quarantined, new_quarantine_start_date
 
     def forward(self, state, action):
         input_variables = self.input_variables
         t = state["current_step"]
-        print("Substep: Quarantine")
 
         is_quarantined = get_by_path(
             state, re.split("/", input_variables["is_quarantined"])
         )
         quarantine_start_date = get_by_path(
             state, re.split("/", input_variables["quarantine_start_date"])
+        )
+        positive_test_result = get_by_path(
+            state, re.split("/", input_variables["positive_test_result"])
+        )
+        quarantine_streak_days = get_by_path(
+            state, re.split("/", input_variables["quarantine_streak_days"])
+        )
+        num_quarantine_days = get_by_path(
+            state, re.split("/", input_variables["num_quarantine_days"])
         )
 
         agent_quarantine_start_action = action["citizens"]["start_compliance_action"]
@@ -116,7 +95,19 @@ class UpdateQuarantineStatus(SubstepTransition):
             agent_quarantine_break_action,
         )
 
+        new_is_quarantined_float = new_is_quarantined.float()
+        new_quarantine_streak_days = torch.where(
+            new_is_quarantined.bool(),
+            quarantine_streak_days + 1.0,
+            torch.zeros_like(quarantine_streak_days),
+        )
+        new_num_quarantine_days = num_quarantine_days + new_is_quarantined_float
+        consumed_positive_test_result = torch.zeros_like(positive_test_result)
+
         return {
             self.output_variables[0]: new_is_quarantined,
             self.output_variables[1]: new_quarantine_start_date,
+            self.output_variables[2]: consumed_positive_test_result,
+            self.output_variables[3]: new_quarantine_streak_days,
+            self.output_variables[4]: new_num_quarantine_days,
         }

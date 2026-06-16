@@ -26,6 +26,8 @@ env.bak/
 venv.bak/
 
 simulation_memory_output/
+logs/
+vllm_cache/
 cache/
 dist/
 

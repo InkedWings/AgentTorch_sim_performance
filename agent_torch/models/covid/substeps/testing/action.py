@@ -1,13 +1,7 @@
 import torch
 import re
 from agent_torch.core.substep import SubstepAction
-from agent_torch.core.helpers import (
-    discrete_sample,
-    get_by_path,
-    logical_and,
-    logical_or,
-    logical_not,
-)
+from agent_torch.core.helpers import discrete_sample, get_by_path
 
 
 class AcceptTest(SubstepAction):
@@ -24,7 +18,6 @@ class AcceptTest(SubstepAction):
         self.device = torch.device(self.config["simulation_metadata"]["device"])
 
     def forward(self, state, observation):
-        print("Executing Substep Policy: Accept Test!")
         agent_is_quarantined = get_by_path(
             state, re.split("/", self.input_variables["is_quarantined"])
         )
@@ -35,19 +28,19 @@ class AcceptTest(SubstepAction):
             state, re.split("/", self.input_variables["test_compliance_prob"])
         )
 
-        not_susceptible = (agent_disease_stage > self.SUSCEPTIBLE_VAR).long()
-        not_recovered = (agent_disease_stage < self.RECOVERED_VAR).long()
-
-        exposed_infected = logical_or(not_susceptible, not_recovered)
-        agent_is_eligible = logical_and(
-            exposed_infected, logical_not(agent_is_quarantined).long()
+        exposed_infected = (
+            (agent_disease_stage > self.SUSCEPTIBLE_VAR)
+            & (agent_disease_stage < self.RECOVERED_VAR)
+        )
+        agent_is_eligible = exposed_infected & torch.logical_not(
+            agent_is_quarantined.bool()
         )
 
         agent_test_compliance = discrete_sample(
             sample_prob=test_compliance_prob,
             size=(self.num_agents,),
             device=self.device,
-        ).unsqueeze(1)
-        agent_test_action = logical_and(agent_is_eligible, agent_test_compliance)
+        ).unsqueeze(1).bool()
+        agent_test_action = agent_is_eligible.bool() & agent_test_compliance
 
         return {self.output_variables[0]: agent_test_action}

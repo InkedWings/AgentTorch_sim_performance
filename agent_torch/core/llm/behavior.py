@@ -1,6 +1,8 @@
 from agent_torch.core.llm.prompt_manager import PromptManager
 from agent_torch.core.dataloader import LoadPopulation
 import torch
+import re
+import json
 
 
 class Behavior:
@@ -26,8 +28,9 @@ class Behavior:
         else:
             # Template-based grouping: initialize memory sized by number of groups
             prompts, _, _ = self.template.get_grouped_prompts(self.population, kwargs={})
+            memory_size = max(len(prompts), int(getattr(self.template, "memory_size", 0) or 0))
             for arch in self.archetype:
-                arch.initialize_memory(num_agents=len(prompts))
+                arch.initialize_memory(num_agents=memory_size)
 
     def pre_sample_hook(self, kwargs):
         """Hook called before sampling - subclasses can override for custom logic."""
@@ -37,8 +40,54 @@ class Behavior:
         """Hook called after sampling - subclasses can override for custom logic."""
         pass
 
+    def _parse_behavior_value(self, output_value, device=None):
+        if isinstance(output_value, dict) and "probability" in output_value:
+            text_value = output_value["probability"]
+        elif isinstance(output_value, dict) and "text" in output_value:
+            text_value = output_value["text"]
+        else:
+            text_value = output_value
+        text = str(text_value).strip()
+        lowered = text.lower()
+
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict) and "probability" in parsed:
+                return float(parsed["probability"])
+        except Exception:
+            json_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+            if json_match:
+                try:
+                    parsed = json.loads(json_match.group(0))
+                    if isinstance(parsed, dict) and "probability" in parsed:
+                        return float(parsed["probability"])
+                except Exception:
+                    pass
+
+        probability_match = re.search(
+            r"(?i)\bprobability\b[^0-9+\-.]{0,40}([-+]?\d*\.?\d+)",
+            text,
+        )
+        if probability_match:
+            return float(probability_match.group(1))
+
+        if re.match(r"^yes\b|^yes[\.,!?:;]", lowered):
+            return 1.0
+        if re.match(r"^no\b|^no[\.,!?:;]", lowered):
+            return 0.0
+        try:
+            value = float(text_value)
+        except Exception:
+            match = re.search(r"[-+]?\d*\.?\d+", text)
+            value = float(match.group(0)) if match else 0.0
+        nan_check = torch.tensor(value, device=device) if device is not None else torch.tensor(value)
+        if torch.isnan(nan_check):
+            return 0.0
+        return value
+
     def sample(self, kwargs=None):
         verbose = bool(kwargs.get("verbose", False)) if kwargs else False
+        llm_history_k = int(kwargs.get("llm_history_k", 12)) if kwargs else 12
         if verbose:
             print("Behavior: Decision")
         self.pre_sample_hook(kwargs)
@@ -82,16 +131,14 @@ class Behavior:
             self.last_group_keys = group_keys
             agent_outputs = []
             for n_arch in range(self.archetype[-1].n_arch):
-                outputs = self.archetype[n_arch](prompt_list, last_k=12)
+                outputs = self.archetype[n_arch](prompt_list, last_k=llm_history_k)
                 agent_outputs.append(outputs)
+            self.last_raw_outputs = agent_outputs[-1] if agent_outputs else []
             group_values_accum = [0.0 for _ in range(len(prompt_list))]
             for arch_outputs in agent_outputs:
                 for en, output_value in enumerate(arch_outputs):
                     try:
-                        text_value = output_value["text"] if isinstance(output_value, dict) and "text" in output_value else output_value
-                        value_for_group = float(text_value)
-                        if torch.isnan(torch.tensor(value_for_group, device=device)):
-                            value_for_group = 0.0
+                        value_for_group = self._parse_behavior_value(output_value, device=device)
                     except Exception:
                         value_for_group = 0.0
                     group_values_accum[en] += value_for_group
@@ -108,7 +155,8 @@ class Behavior:
             print(f"Population sample complete: outputs shape={tuple(sampled_behavior.shape)}, mean={mean_val:.4f}")
             if verbose:
                 print(f"=== End Population LLM Calls ===\n")
-            self.archetype[-1].export_memory_to_file(file_dir=kwargs["current_memory_dir"], last_k=len(prompt_list))
+            if llm_history_k > 0 and kwargs.get("current_memory_dir"):
+                self.archetype[-1].export_memory_to_file(file_dir=kwargs["current_memory_dir"], last_k=len(prompt_list))
             self.post_sample_hook(sampled_behavior, kwargs)
             return sampled_behavior
 
@@ -125,7 +173,8 @@ class Behavior:
         masks = self.get_masks_for_each_group(self.prompt_manager.dict_variables_with_values, kwargs)
         agent_outputs = []
         for n_arch in range(self.archetype[-1].n_arch):
-            agent_outputs.append(self.archetype[n_arch](prompt_list, last_k=12))
+            agent_outputs.append(self.archetype[n_arch](prompt_list, last_k=llm_history_k))
+        self.last_raw_outputs = agent_outputs[-1] if agent_outputs else []
         sampled_behavior = self.get_sampled_behavior(sampled_behavior, masks, agent_outputs)
         # Always print meta summary regardless of verbosity
         try:
@@ -135,7 +184,8 @@ class Behavior:
         print(f"Population sample complete: outputs shape={tuple(sampled_behavior.shape)}, mean={mean_val:.4f}")
         if verbose:
             print(f"=== End Population LLM Calls ===\n")
-        self.archetype[-1].export_memory_to_file(file_dir=kwargs["current_memory_dir"], last_k=len(prompt_list))
+        if llm_history_k > 0 and kwargs.get("current_memory_dir"):
+            self.archetype[-1].export_memory_to_file(file_dir=kwargs["current_memory_dir"], last_k=len(prompt_list))
         self.post_sample_hook(sampled_behavior, kwargs)
         return sampled_behavior
 
@@ -143,15 +193,7 @@ class Behavior:
         for agent_output in agent_outputs:
             for en, output_value in enumerate(agent_output):
                 try:
-                    # Handle both string and dictionary formats
-                    if isinstance(output_value, dict) and "text" in output_value:
-                        text_value = output_value["text"]
-                    else:
-                        text_value = output_value
-                    
-                    value_for_group = float(text_value)
-                    if torch.isnan(torch.tensor(value_for_group)):
-                        value_for_group = 0.0
+                    value_for_group = self._parse_behavior_value(output_value)
                 except Exception:
                     value_for_group = 0.0
                 sampled_behavior_for_group = masks[en] * value_for_group
@@ -179,6 +221,8 @@ class Behavior:
                         comparison = variables[key] == value
                         if not isinstance(comparison, torch.Tensor):
                             comparison = torch.tensor(comparison, device=device)
+                        else:
+                            comparison = comparison.to(device)
                         mask = torch.logical_and(mask, comparison)
             mask = mask.unsqueeze(1)
             float_mask = mask.float()

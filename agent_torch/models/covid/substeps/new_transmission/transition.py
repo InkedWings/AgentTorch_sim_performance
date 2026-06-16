@@ -177,6 +177,11 @@ class NewTransmission(SubstepTransitionMessagePassing):
         )
 
         will_isolate = action["citizens"]["isolation_decision"]
+        if "is_quarantined" in input_variables:
+            is_quarantined = get_by_path(
+                state, re.split("/", input_variables["is_quarantined"])
+            ).to(self.device)
+            will_isolate = torch.maximum(will_isolate.float(), is_quarantined.float())
 
         all_node_attr = (
             torch.stack(
@@ -214,7 +219,7 @@ class NewTransmission(SubstepTransitionMessagePassing):
             R=R,
             SFSusceptibility=SFSusceptibility,
             SFInfector=SFInfector,
-            lam_gamma_integrals=all_lam_gamma.squeeze(),
+            lam_gamma_integrals=all_lam_gamma.reshape(-1),
         )
 
         prob_not_infected = torch.exp(-1 * new_transmission)

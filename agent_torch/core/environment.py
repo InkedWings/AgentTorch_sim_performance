@@ -142,7 +142,15 @@ class envs:
                     if substep_name in substep_func_dict:
                         substep_class = substep_func_dict[substep_name]
                         if hasattr(substep_class, "set_behavior"):
-                            behavior = Behavior(archetype=archetype, region=population)
+                            if isinstance(archetype, Behavior):
+                                behavior = archetype
+                            elif hasattr(archetype, "broadcast") and hasattr(
+                                archetype, "_llm_archetypes"
+                            ):
+                                archetype.broadcast(population)
+                                behavior = archetype._behavior
+                            else:
+                                behavior = Behavior(archetype=archetype, region=population)
                             substep_class.set_behavior(behavior)
 
             # 3. Now initialize runner after behaviors are set

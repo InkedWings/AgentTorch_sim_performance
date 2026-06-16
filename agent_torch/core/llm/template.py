@@ -233,6 +233,33 @@ class Template:
         
         # DataFrame columns should already be clean - just convert to string
         return str(value)
+
+    def _agent_value_from_source(self, value: Any, agent_id: int, pop_size: int | None = None) -> Any:
+        """Return the per-agent value when ``value`` is an agent-aligned vector."""
+        if value is None or isinstance(value, (str, bytes, int, float, bool)):
+            return value
+        if torch.is_tensor(value):
+            if value.ndim > 0 and agent_id < value.shape[0]:
+                item = value[agent_id]
+                if torch.is_tensor(item) and item.numel() == 1:
+                    return item.item()
+                return item.detach().cpu().tolist() if torch.is_tensor(item) else item
+            return value.item() if value.ndim == 0 else value
+        if hasattr(value, "iloc"):
+            try:
+                if agent_id < len(value):
+                    item = value.iloc[agent_id]
+                    return item.item() if hasattr(item, "item") else item
+            except Exception:
+                return value
+        if hasattr(value, "__getitem__") and hasattr(value, "__len__"):
+            try:
+                if pop_size is None or len(value) == pop_size:
+                    item = value[agent_id]
+                    return item.item() if hasattr(item, "item") else item
+            except Exception:
+                return value
+        return value
     
     def _fill_section(self, template_section: str, data: Dict[str, Any], slot_values: Dict[str, Any] = None) -> str:
         """
@@ -375,7 +402,9 @@ class Template:
             profile: Dict[str, Any] = {}
             for key in keys:
                 val = None
-                if hasattr(population, key):
+                if key in (kwargs or {}):
+                    val = self._agent_value_from_source((kwargs or {}).get(key), i, pop_size)
+                if val is None and hasattr(population, key):
                     attr = getattr(population, key)
                     if hasattr(attr, '__getitem__') and i < len(attr):
                         v = attr[i]
@@ -454,7 +483,7 @@ class Template:
             if isinstance(system_prompt, str) and system_prompt.strip():
                 sys_text = system_prompt.strip()
         if sys_text:
-            parts.append(sys_text)
+            parts.append(self._fill_section(sys_text, all_data))
         base_text = getattr(self, "prompt_string", "")
         base_text = self._normalize_self_placeholders(base_text)
         # Replace placeholders using all_data
@@ -474,7 +503,7 @@ class Template:
                     out_text = cand.strip()
                     break
         if out_text:
-            parts.append(out_text)
+            parts.append(self._fill_section(out_text, all_data))
         return " ".join(p for p in parts if p).strip()
 
     def assemble_data(self, agent_id: int, population, mapping: Dict[str, Any] = None, config_kwargs: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -483,12 +512,12 @@ class Template:
         Includes population, external, and config data.
         """
         mapping = mapping or {}
+        base_text_for_fields = self.get_base_prompt_manager_template()
+        requested_fields = set(re.findall(r"\{([^,}]+)\}", base_text_for_fields))
         # 1. Population data
         population_data: Dict[str, Any] = {}
         if population:
             # Determine all fields referenced in the base prompt (handles class-based hooks)
-            base_text_for_fields = self.get_base_prompt_manager_template()
-            requested_fields = set(re.findall(r"\{([^,}]+)\}", base_text_for_fields))
             for field_name in requested_fields:
                 if hasattr(population, field_name):
                     field_data = getattr(population, field_name)
@@ -534,8 +563,6 @@ class Template:
         external_data: Dict[str, Any] = {}
         external_df = self._load_external_data()
         if external_df is not None:
-            base_text_for_fields = self.get_base_prompt_manager_template()
-            requested_fields = set(re.findall(r"\{([^,}]+)\}", base_text_for_fields))
             # Determine matching row based on configured key if available
             match_on_key: Optional[str] = getattr(self, "_match_on", None)
             matched_row: Optional[pd.Series] = None
@@ -616,8 +643,15 @@ class Template:
                             external_data[field_name] = self._process_field_value(field_name, matched_row[field_name])
                         except Exception:
                             pass
-        # 3. Config data
-        config_data = dict(config_kwargs or {})
+        # 3. Config data. Values may be scalars or per-agent vectors supplied
+        # by a simulation policy at sample time.
+        config_data = {}
+        pop_size = getattr(population, "population_size", None)
+        for key, value in dict(config_kwargs or {}).items():
+            if key in requested_fields:
+                config_data[key] = self._agent_value_from_source(value, agent_id, pop_size)
+            elif isinstance(value, (str, int, float, bool)):
+                config_data[key] = value
         # No special-case aliasing; users must provide canonical keys
         # Merge with precedence: external < population < self_vars < config
         all_data: Dict[str, Any] = {}
