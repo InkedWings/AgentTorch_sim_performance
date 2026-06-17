@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+#PBS -N agt_single_sweep
+#PBS -A SDR
+#PBS -q preemptable
+#PBS -l select=2:system=polaris
+#PBS -l filesystems=home:eagle
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#
+# AgentTorch single-instance benchmark sweep (population + grouping).
+# 2 nodes: node0 -> vLLM server, node1 -> sim runner.
+#
+# Submit:
+#   cd /lus/eagle/projects/lc-mpi/ZhijingYe/AgentTorch
+#   qsub bench/submit_single_instance.pbs
+#
+# Override at submit time, e.g.:
+#   qsub -v BENCH_WHICH=population,BENCH_REPEATS=3 bench/submit_single_instance.pbs
+#   qsub -A SDR -q debug -l walltime=01:00:00 bench/submit_single_instance.pbs
+#
+# Env overrides (passed through to sweep_single_instance.sh):
+#   BENCH_WHICH=all|population|group|smoke
+#   BENCH_POP_SIZES, BENCH_GROUP_MODES, BENCH_HISTORY_KS, BENCH_REPEATS,
+#   BENCH_STEPS, BENCH_SAMPLE_INTERVAL, BENCH_OUT_ROOT, VLLM_PORT
+set -euo pipefail
+
+ROOT="${AGENTTORCH_ROOT:-${PBS_O_WORKDIR:-/lus/eagle/projects/lc-mpi/ZhijingYe/AgentTorch}}"
+cd "$ROOT"
+
+# --- discover the two allocated nodes (unique, in order) ---
+mapfile -t NODES < <(awk '!seen[$0]++' "$PBS_NODEFILE" | sed 's/\..*//')
+if [[ "${#NODES[@]}" -lt 2 ]]; then
+  echo "Need >=2 nodes, got: ${NODES[*]:-none}" >&2
+  exit 2
+fi
+export VLLM_NODE="${VLLM_NODE:-${NODES[0]}}"
+export SIM_NODE="${SIM_NODE:-${NODES[1]}}"
+
+export VLLM_PORT="${VLLM_PORT:-8000}"
+export BENCH_WHICH="${BENCH_WHICH:-all}"
+export BENCH_OUT_ROOT="${BENCH_OUT_ROOT:-$ROOT/bench/results/single_instance_${PBS_JOBID:-manual}}"
+
+echo "JobID:    ${PBS_JOBID:-<none>}"
+echo "Nodes:    ${NODES[*]}"
+echo "VLLM_NODE=$VLLM_NODE  SIM_NODE=$SIM_NODE  port=$VLLM_PORT"
+echo "WHICH:    $BENCH_WHICH"
+echo "OUT:      $BENCH_OUT_ROOT"
+
+bash "$ROOT/bench/sweep_single_instance.sh" "$BENCH_WHICH"
+rc=$?
+
+echo "Stopping vLLM..."
+VLLM_NODE="$VLLM_NODE" VLLM_PORT="$VLLM_PORT" "$ROOT/manage_vllm.sh" stop >/dev/null 2>&1 || true
+
+echo "Sweep finished rc=$rc; results under $BENCH_OUT_ROOT"
+exit "$rc"

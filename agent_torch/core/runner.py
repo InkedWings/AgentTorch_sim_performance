@@ -170,19 +170,28 @@ class Runner(nn.Module):
             num_steps = self.config["simulation_metadata"]["num_steps_per_episode"]
 
         step_times = []
+        # Benchmark instrumentation: per-step / per-substep timing exposed on self.
+        # Gated sync makes timings reflect real GPU compute, not just kernel launch.
+        bench_sync = bool(
+            self.config["simulation_metadata"].get("BENCH_CUDA_SYNC", False)
+        )
+        substep_times = []  # list[list[float]] -> per step, per substep wall time
 
         for time_step in range(num_steps):
+            if bench_sync and self.use_gpu:
+                torch.cuda.synchronize()
             step_start = time.perf_counter()
-            
+
             self.state["current_step"] = time_step
 
             # always snapshot every step/substep to cpu (match base runner)
             self.state_trajectory.append([])
+            substep_times.append([])
 
             # Process substeps with optimizations
             for substep_idx, substep in enumerate(self.config["substeps"].keys()):
                 substep_start = time.perf_counter()
-                
+
                 # OPTIMIZATION: Vectorized agent processing where possible
                 observation_profile, action_profile = self._process_substep_vectorized(substep)
                 
@@ -202,11 +211,20 @@ class Runner(nn.Module):
                         self._return_to_pool(t)
                     self._leased_tensors.clear()
                 
+                if bench_sync and self.use_gpu:
+                    torch.cuda.synchronize()
                 substep_time = time.perf_counter() - substep_start
-            
+                substep_times[-1].append(substep_time)
+
+            if bench_sync and self.use_gpu:
+                torch.cuda.synchronize()
             step_time = time.perf_counter() - step_start
             step_times.append(step_time)
 
+        # Benchmark instrumentation: expose timing for external harnesses.
+        self.bench_step_times = list(step_times)
+        self.bench_substep_times = [list(s) for s in substep_times]
+        self.bench_substep_names = list(self.config["substeps"].keys())
 
         # Performance summary
         avg_step_time = sum(step_times) / len(step_times)

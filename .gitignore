@@ -32,3 +32,7 @@ cache/
 dist/
 
 *.parquet
+
+# benchmark outputs and generated sub-populations
+bench/results/
+agent_torch/populations/_bench_subpops/
